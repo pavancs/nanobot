@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nanobot Debug Viewer</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; }
+h1 { color: #58a6ff; margin-bottom: 20px; font-size: 1.5em; }
+.tabs { display: flex; gap: 10px; margin-bottom: 20px; }
+.tab { padding: 8px 16px; background: #161b22; border: 1px solid #30363d; border-radius: 6px; cursor: pointer; color: #8b949e; }
+.tab.active { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.stat-card .label { color: #8b949e; font-size: 0.85em; }
+.stat-card .value { color: #58a6ff; font-size: 1.8em; font-weight: bold; margin-top: 4px; }
+.stat-card .sub { color: #8b949e; font-size: 0.8em; margin-top: 2px; }
+.trace-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; margin-bottom: 12px; overflow: hidden; }
+.trace-header { padding: 12px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; }
+.trace-header:hover { background: #1c2128; }
+.left { display: flex; gap: 12px; align-items: center; }
+.time { color: #8b949e; font-size: 0.85em; min-width: 80px; }
+.channel-badge { background: #1f6feb; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 0.75em; }
+.msg { color: #c9d1d9; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.right { display: flex; gap: 12px; align-items: center; font-size: 0.8em; color: #8b949e; }
+.tokens { color: #f0883e; }
+.duration { color: #3fb950; }
+.error-badge { color: #f85149; font-weight: bold; }
+.trace-detail { display: none; padding: 0 16px 16px; }
+.trace-detail.open { display: block; }
+.section { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; margin-top: 10px; }
+.section-header { padding: 8px 12px; cursor: pointer; color: #58a6ff; font-size: 0.9em; }
+.section-header:hover { background: #161b22; }
+.section-body { display: none; padding: 8px 12px; font-size: 0.85em; color: #8b949e; white-space: pre-wrap; word-break: break-all; border-top: 1px solid #30363d; }
+.section-body.open { display: block; }
+.section-body table { width: 100%; border-collapse: collapse; }
+.section-body td { padding: 4px 8px; border-bottom: 1px solid #21262d; }
+.section-body td:first-child { color: #c9d1d9; width: 180px; }
+.llm-call { background: #1c1e26; border-left: 3px solid #1f6feb; padding: 8px 12px; margin: 6px 0; border-radius: 4px; font-size: 0.85em; }
+.tool-call { background: #1c1e26; border-left: 3px solid #f0883e; padding: 8px 12px; margin: 6px 0; border-radius: 4px; font-size: 0.85em; }
+.tool-call.error { border-left-color: #f85149; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.75em; }
+.badge-ok { background: #238636; color: #fff; }
+.badge-error { background: #da3633; color: #fff; }
+.badge-tool { background: #f0883e; color: #fff; }
+.badge-text { background: #1f6feb; color: #fff; }
+.refresh-info { color: #8b949e; font-size: 0.8em; text-align: right; margin-bottom: 10px; }
+#loading { color: #8b949e; text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+<h1>&#x1f41b; Nanobot Debug Viewer</h1>
+<div class="tabs">
+  <div class="tab active" onclick="showTab('traces')">Traces</div>
+  <div class="tab" onclick="showTab('stats')">Stats</div>
+</div>
+<div id="stats-view" style="display:none">
+  <div class="stats-grid" id="stats-grid"></div>
+  <div id="daily-stats"></div>
+</div>
+<div id="traces-view">
+  <div class="refresh-info"><button onclick="loadTraces()" style="padding:4px 12px;background:#1f6feb;color:#fff;border:none;border-radius:4px;cursor:pointer;margin-right:8px">Refresh</button>Last refreshed: <span id="last-refresh">-</span></div>
+  <div id="traces-list"><div id="loading">Loading traces...</div></div>
+</div>
+<script>
+let currentTab = "traces";
+function showTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  event.target.classList.add("active");
+  document.getElementById("traces-view").style.display = tab === "traces" ? "block" : "none";
+  document.getElementById("stats-view").style.display = tab === "stats" ? "block" : "none";
+  if (tab === "stats") loadStats();
+}
+
+async function loadTraces() {
+  try {
+    const res = await fetch("/api/traces?limit=50");
+    const traces = await res.json();
+    const el = document.getElementById("traces-list");
+    if (!traces.length) { el.innerHTML = '<div id="loading">No traces yet. Send a message on Telegram.</div>'; return; }
+    el.innerHTML = traces.map(t => {
+      const time = t.timestamp ? t.timestamp.substring(11, 19) : "?";
+      const s = t.summary || {};
+      const tokens = (s.total_input_tokens || 0) + (s.total_output_tokens || 0);
+      const dur = s.total_duration_ms || 0;
+      const hasError = s.error || s.stop_reason === "error";
+      return `<div class="trace-card">
+        <div class="trace-header" onclick="toggleTrace(this, '${t.filename}')">
+          <div class="left">
+            <span class="time">${time}</span>
+            <span class="channel-badge">${t.channel}</span>
+            <span class="msg">${esc(t.input_message)}</span>
+          </div>
+          <div class="right">
+            ${hasError ? '<span class="error-badge">ERROR</span>' : ''}
+            <span class="tokens">${tokens} tok</span>
+            <span class="duration">${dur}ms</span>
+            <span>${t.llm_calls_count} LLM / ${t.tools_count} tools</span>
+          </div>
+        </div>
+        <div class="trace-detail" id="detail-${t.trace_id}"></div>
+      </div>`;
+    }).join("");
+    document.getElementById("last-refresh").textContent = new Date().toLocaleTimeString();
+  } catch(e) { console.error(e); }
+}
+
+async function toggleTrace(header, filename) {
+  const detail = header.nextElementSibling;
+  if (detail.classList.contains("open")) { detail.classList.remove("open"); return; }
+  if (detail.dataset.loaded !== "true") {
+    detail.innerHTML = "Loading...";
+    const res = await fetch(`/api/traces/${filename}`);
+    const t = await res.json();
+    detail.innerHTML = renderDetail(t);
+    detail.dataset.loaded = "true";
+  }
+  detail.classList.toggle("open");
+}
+
+function renderDetail(t) {
+  const ctx = t.context || {};
+  let html = `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Context (${ctx.system_prompt_tokens} sys + ${ctx.history_tokens} hist tokens, ${ctx.history_messages} msgs)</div>
+    <div class="section-body"><table>
+      <tr><td>System prompt tokens</td><td>${ctx.system_prompt_tokens}</td></tr>
+      <tr><td>Sections loaded</td><td>${(ctx.system_prompt_sections||[]).join(", ")}</td></tr>
+      <tr><td>History messages</td><td>${ctx.history_messages}</td></tr>
+      <tr><td>History tokens</td><td>${ctx.history_tokens}</td></tr>
+      <tr><td>Total messages to LLM</td><td>${ctx.total_input_messages}</td></tr>
+    </table></div></div>`;
+
+  if (t.llm_calls && t.llm_calls.length) {
+    html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">LLM Calls (${t.llm_calls.length})</div><div class="section-body open">`;
+    t.llm_calls.forEach(c => {
+      const badge = c.response_type === "tool_call" ? '<span class="badge badge-tool">tool_call</span>' : '<span class="badge badge-text">text</span>';
+      html += `<div class="llm-call">
+        <b>#${c.iteration + 1}</b> ${badge} &nbsp; ${c.model} &nbsp; <span style="color:#f0883e">${c.input_tokens}in/${c.output_tokens}out</span> &nbsp; <span style="color:#3fb950">${c.duration_ms}ms</span>
+        ${c.tool_calls.length ? "<br>Tools: " + c.tool_calls.map(tc => `<b>${tc.name}</b>`).join(", ") : ""}
+        ${c.content_preview ? `<br><span style="color:#8b949e">${esc(c.content_preview.substring(0, 200))}</span>` : ""}
+      </div>`;
+    });
+    html += "</div></div>";
+  }
+
+  if (t.tool_executions && t.tool_executions.length) {
+    html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Tool Executions (${t.tool_executions.length})</div><div class="section-body open">`;
+    t.tool_executions.forEach(tool => {
+      const cls = tool.status === "error" ? "tool-call error" : "tool-call";
+      const badge = tool.status === "ok" ? '<span class="badge badge-ok">ok</span>' : '<span class="badge badge-error">error</span>';
+      html += `<div class="${cls}">
+        <b>${tool.name}</b> ${badge} &nbsp; <span style="color:#3fb950">${tool.duration_ms}ms</span>
+        ${Object.keys(tool.args||{}).length ? `<br>Args: ${esc(JSON.stringify(tool.args).substring(0, 200))}` : ""}
+        ${tool.result_preview ? `<br>Result: <span style="color:#8b949e">${esc(tool.result_preview.substring(0, 200))}</span>` : ""}
+      </div>`;
+    });
+    html += "</div></div>";
+  }
+
+  const s = t.summary || {};
+  html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Summary</div><div class="section-body open"><table>
+    <tr><td>Total tokens</td><td>${s.total_input_tokens} in / ${s.total_output_tokens} out</td></tr>
+    <tr><td>Duration</td><td>${s.total_duration_ms}ms</td></tr>
+    <tr><td>Stop reason</td><td>${s.stop_reason}</td></tr>
+    ${s.error ? `<tr><td>Error</td><td style="color:#f85149">${esc(s.error)}</td></tr>` : ""}
+  </table></div></div>`;
+
+  if (t.final_response) {
+    html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Final Response</div>
+      <div class="section-body">${esc(t.final_response)}</div></div>`;
+  }
+  return html;
+}
+
+function esc(s) { if (!s) return ""; const d = document.createElement("div"); d.textContent = s; return d.innerHTML; }
+
+async function loadStats() {
+  try {
+    const [stats, daily] = await Promise.all([fetch("/api/stats").then(r=>r.json()), fetch("/api/stats/daily?days=14").then(r=>r.json())]);
+    const grid = document.getElementById("stats-grid");
+    grid.innerHTML = ["today","week","month","all_time"].map(period => {
+      const s = stats[period] || {};
+      const label = {today:"Today",week:"This Week",month:"This Month",all_time:"All Time"}[period];
+      return `<div class="stat-card"><div class="label">${label}</div><div class="value">${s.messages||0}</div><div class="sub">messages</div>
+        <div class="sub">${s.tokens_in||0} in / ${s.tokens_out||0} out tokens</div>
+        <div class="sub">avg ${s.avg_duration_ms||0}ms</div></div>`;
+    }).join("");
+    const dailyEl = document.getElementById("daily-stats");
+    if (daily.length) {
+      dailyEl.innerHTML = `<h3 style="color:#58a6ff;margin:20px 0 10px">Daily Breakdown</h3><table style="width:100%;border-collapse:collapse"><tr style="color:#8b949e"><td>Date</td><td>Messages</td><td>Tokens In</td><td>Tokens Out</td><td>Total Duration</td></tr>` +
+        daily.map(d => `<tr><td>${d.date}</td><td>${d.messages}</td><td>${d.tokens_in}</td><td>${d.tokens_out}</td><td>${d.duration_ms}ms</td></tr>`).join("") + "</table>";
+    }
+  } catch(e) { console.error(e); }
+}
+
+loadTraces();
+
+</script>
+</body>
+</html>

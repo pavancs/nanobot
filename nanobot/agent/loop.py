@@ -17,6 +17,7 @@ from nanobot.agent.hook import AgentHook, AgentHookContext, CompositeHook
 from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.subagent import SubagentManager
+from nanobot.agent.tracer import Tracer
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -104,6 +105,37 @@ class _LoopHook(AgentHook):
             u.get("completion_tokens", 0),
             u.get("cached_tokens", 0),
         )
+        # Trace: log LLM call
+        tracer = self._loop.tracer
+        if tracer.active:
+            has_tools = bool(context.tool_calls)
+            response_type = "tool_call" if has_tools else "text"
+            content_preview = ""
+            if context.response and context.response.content:
+                content_preview = context.response.content[:300]
+            tc_list = []
+            if has_tools:
+                for tc in context.tool_calls:
+                    tc_list.append({"name": tc.name, "args": tc.arguments})
+            tracer.log_llm_call(
+                iteration=context.iteration,
+                model=self._loop.model,
+                usage=u,
+                duration_ms=0,
+                response_type=response_type,
+                content_preview=content_preview,
+                tool_calls=tc_list,
+            )
+        # Trace: log tool results
+        if tracer.active and context.tool_events:
+            for event in context.tool_events:
+                tracer.log_tool(
+                    name=event.get("name", ""),
+                    args={},
+                    result_preview=event.get("detail", ""),
+                    duration_ms=0,
+                    status=event.get("status", "ok"),
+                )
 
     def finalize_content(self, context: AgentHookContext, content: str | None) -> str | None:
         return self._loop._strip_think(content)
@@ -255,6 +287,7 @@ class AgentLoop:
             provider=provider,
             model=self.model,
         )
+        self.tracer = Tracer(workspace)
         self._register_default_tools()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
@@ -552,6 +585,7 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
+        self.tracer.start(channel=msg.channel, sender_id=msg.sender_id, session_key=key, input_message=msg.content, model=self.model)
         session = self.sessions.get_or_create(key)
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
@@ -576,6 +610,23 @@ class AgentLoop:
             media=msg.media if msg.media else None,
             channel=msg.channel, chat_id=msg.chat_id,
         )
+
+        # Trace: log context info
+        if self.tracer.active:
+            from nanobot.utils.helpers import estimate_message_tokens
+            sys_msg = initial_messages[0] if initial_messages else {}
+            sys_tokens = estimate_message_tokens(sys_msg)
+            hist_tokens = sum(estimate_message_tokens(m) for m in history)
+            sections = [f.name for f in [self.workspace / n for n in self.context.BOOTSTRAP_FILES] if f.exists()]
+            if (self.workspace / "memory" / "MEMORY.md").exists():
+                sections.append("MEMORY.md")
+            self.tracer.log_context(
+                system_prompt_tokens=sys_tokens,
+                sections=sections,
+                history_messages=len(history),
+                history_tokens=hist_tokens,
+                total_messages=len(initial_messages),
+            )
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
@@ -605,6 +656,13 @@ class AgentLoop:
 
         if (mt := self.tools.get("message")) and isinstance(mt, MessageTool) and mt._sent_in_turn:
             return None
+
+        # Trace: finish
+        self.tracer.finish(
+            final_response=final_content,
+            usage=self._last_usage,
+            stop_reason="completed",
+        )
 
         preview = final_content[:120] + "..." if len(final_content) > 120 else final_content
         logger.info("Response to {}:{}: {}", msg.channel, msg.sender_id, preview)
