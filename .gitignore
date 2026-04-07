@@ -24,3 +24,8 @@ botpy.log
 nano.*.save
 .DS_Store
 uv.lock
+
+# Debug traces and stats
+traces/
+stats.jsonl
+*.bak
