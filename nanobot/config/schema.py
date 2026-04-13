@@ -79,10 +79,29 @@ class AgentDefaults(Base):
     dream: DreamConfig = Field(default_factory=DreamConfig)
 
 
+class SubagentConfig(Base):
+    """Configuration for a named subagent."""
+
+    model: str = ""
+    provider: str = "openrouter"
+    description: str = ""
+    triggers: list[str] = Field(default_factory=list)
+
+
+class RouterConfig(Base):
+    """Orchestrator router configuration."""
+
+    enabled: bool = False
+    model: str = ""  # Cheap model for classification (uses default if empty)
+    provider: str = "openrouter"
+
+
 class AgentsConfig(Base):
     """Agent configuration."""
 
     defaults: AgentDefaults = Field(default_factory=AgentDefaults)
+    router: RouterConfig = Field(default_factory=RouterConfig)
+    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)
 
 
 class ProviderConfig(Base):

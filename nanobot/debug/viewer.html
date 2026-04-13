@@ -121,8 +121,21 @@ async function toggleTrace(header, filename) {
 }
 
 function renderDetail(t) {
+  const r = t.routing || {};
+  let html = "";
+  if (r.route) {
+    const routeColor = r.route === "subagent" ? "#f0883e" : "#3fb950";
+    html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')" style="color:${routeColor}">Routing: ${r.route}${r.subagent ? " → " + r.subagent : ""}</div><div class="section-body open"><table>
+      <tr><td>Route</td><td style="color:${routeColor}">${r.route}</td></tr>
+      ${r.subagent ? `<tr><td>Subagent</td><td>${r.subagent}</td></tr>` : ""}
+      <tr><td>Model</td><td>${r.model || "default"}</td></tr>
+      <tr><td>Reason</td><td>${r.reason}</td></tr>
+      <tr><td>Method</td><td>${r.method}</td></tr>
+    </table></div></div>`;
+  }
+
   const ctx = t.context || {};
-  let html = `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Context (${ctx.system_prompt_tokens} sys + ${ctx.history_tokens} hist tokens, ${ctx.history_messages} msgs)</div>
+  html += `<div class="section"><div class="section-header" onclick="this.nextElementSibling.classList.toggle('open')">Context (${ctx.system_prompt_tokens} sys + ${ctx.history_tokens} hist tokens, ${ctx.history_messages} msgs)</div>
     <div class="section-body"><table>
       <tr><td>System prompt tokens</td><td>${ctx.system_prompt_tokens}</td></tr>
       <tr><td>Sections loaded</td><td>${(ctx.system_prompt_sections||[]).join(", ")}</td></tr>

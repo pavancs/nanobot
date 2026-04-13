@@ -18,6 +18,7 @@ from nanobot.agent.memory import Consolidator, Dream
 from nanobot.agent.runner import AgentRunSpec, AgentRunner
 from nanobot.agent.subagent import SubagentManager
 from nanobot.agent.tracer import Tracer
+from nanobot.agent.router import Router
 from nanobot.agent.tools.cron import CronTool
 from nanobot.agent.skills import BUILTIN_SKILLS_DIR
 from nanobot.agent.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
@@ -288,6 +289,23 @@ class AgentLoop:
             model=self.model,
         )
         self.tracer = Tracer(workspace)
+
+        # Initialize router
+        agents_config = getattr(self, '_agents_config', None)
+        self.router = None
+        try:
+            from nanobot.config.loader import load_config
+            config = load_config()
+            if hasattr(config, 'agents') and hasattr(config.agents, 'router'):
+                self.router = Router(
+                    provider=provider,
+                    router_config=config.agents.router,
+                    subagents_config={k: v for k, v in config.agents.subagents.items()} if hasattr(config.agents, 'subagents') else {},
+                    default_model=self.model,
+                )
+        except Exception as e:
+            logger.warning("Failed to initialize router: {}", e)
+
         self._register_default_tools()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
@@ -627,6 +645,35 @@ class AgentLoop:
                 history_tokens=hist_tokens,
                 total_messages=len(initial_messages),
             )
+
+        # Route the message
+        routing_decision = None
+        if self.router and self.router.enabled:
+            routing_decision = await self.router.classify(msg.content)
+            self.tracer.log_routing(routing_decision)
+            logger.info("Router: {} -> {} ({})", routing_decision.route, routing_decision.subagent or "direct", routing_decision.reason)
+
+            if routing_decision.route == "subagent" and routing_decision.subagent:
+                # Delegate to subagent with specialized model
+                result = await self.subagents.spawn(
+                    task=msg.content,
+                    label=routing_decision.subagent,
+                    model=routing_decision.model,
+                    subagent_name=routing_decision.subagent,
+                    origin_channel=msg.channel,
+                    origin_chat_id=msg.chat_id,
+                    session_key=key,
+                )
+                # Subagent result comes back async via message bus
+                # Save the routing info and return a progress message
+                self.tracer.finish(
+                    final_response=f"Delegated to {routing_decision.subagent}",
+                    stop_reason="delegated",
+                )
+                session.add_message("user", msg.content)
+                session.add_message("assistant", f"Let me think about that... (delegated to {routing_decision.subagent})")
+                self.sessions.save(session)
+                return None  # Response comes via subagent callback
 
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})

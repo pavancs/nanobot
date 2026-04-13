@@ -18,6 +18,7 @@ from nanobot.agent.tools.search import GlobTool, GrepTool
 from nanobot.agent.tools.shell import ExecTool
 from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage
+from nanobot.agent.tracer import Tracer
 from nanobot.bus.queue import MessageBus
 from nanobot.config.schema import ExecToolConfig, WebToolsConfig
 from nanobot.providers.base import LLMProvider
@@ -63,6 +64,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self.runner = AgentRunner(provider)
+        self._tracer = Tracer(workspace)
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -73,14 +75,17 @@ class SubagentManager:
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
         session_key: str | None = None,
+        model: str | None = None,
+        subagent_name: str | None = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         origin = {"channel": origin_channel, "chat_id": origin_chat_id}
+        run_model = model or self.model
 
         bg_task = asyncio.create_task(
-            self._run_subagent(task_id, task, display_label, origin)
+            self._run_subagent(task_id, task, display_label, origin, run_model, subagent_name)
         )
         self._running_tasks[task_id] = bg_task
         if session_key:
@@ -104,9 +109,29 @@ class SubagentManager:
         task: str,
         label: str,
         origin: dict[str, str],
+        model: str | None = None,
+        subagent_name: str | None = None,
     ) -> None:
         """Execute the subagent task and announce the result."""
         logger.info("Subagent [{}] starting task: {}", task_id, label)
+
+        # Start subagent trace
+        run_model = model or self.model
+        self._tracer.start(
+            channel=origin.get("channel", "subagent"),
+            sender_id=f"subagent:{subagent_name or task_id}",
+            session_key=f"subagent:{task_id}",
+            input_message=task,
+            model=run_model,
+        )
+        if self._tracer.active:
+            self._tracer.active.routing = {
+                "route": "subagent",
+                "subagent": subagent_name or "",
+                "model": run_model,
+                "reason": "delegated by orchestrator",
+                "method": "delegation",
+            }
 
         try:
             # Build subagent tools (no message tool, no spawn tool)
@@ -130,7 +155,7 @@ class SubagentManager:
             if self.web_config.enable:
                 tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
                 tools.register(WebFetchTool(proxy=self.web_config.proxy))
-            system_prompt = self._build_subagent_prompt()
+            system_prompt = self._build_subagent_prompt(subagent_name)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": task},
@@ -139,7 +164,7 @@ class SubagentManager:
             result = await self.runner.run(AgentRunSpec(
                 initial_messages=messages,
                 tools=tools,
-                model=self.model,
+                model=model or self.model,
                 max_iterations=15,
                 max_tool_result_chars=self.max_tool_result_chars,
                 hook=_SubagentHook(task_id),
@@ -147,7 +172,27 @@ class SubagentManager:
                 error_message=None,
                 fail_on_tool_error=True,
             ))
+            # Log subagent trace
+            if self._tracer.active:
+                for event in (result.tool_events or []):
+                    self._tracer.log_tool(
+                        name=event.get("name", ""),
+                        args={},
+                        result_preview=event.get("detail", ""),
+                        duration_ms=0,
+                        status=event.get("status", "ok"),
+                    )
+                self._tracer.log_llm_call(
+                    iteration=0,
+                    model=run_model,
+                    usage=result.usage or {},
+                    duration_ms=0,
+                    response_type="text" if result.final_content else "error",
+                    content_preview=(result.final_content or result.error or "")[:300],
+                )
+
             if result.stop_reason == "tool_error":
+                self._tracer.finish(final_response=self._format_partial_progress(result), stop_reason="tool_error")
                 await self._announce_result(
                     task_id,
                     label,
@@ -158,6 +203,7 @@ class SubagentManager:
                 )
                 return
             if result.stop_reason == "error":
+                self._tracer.finish(final_response=result.error, stop_reason="error", error=result.error)
                 await self._announce_result(
                     task_id,
                     label,
@@ -170,11 +216,21 @@ class SubagentManager:
             final_result = result.final_content or "Task completed but no final response was generated."
 
             logger.info("Subagent [{}] completed successfully", task_id)
+            self._tracer.finish(
+                final_response=final_result,
+                usage=result.usage,
+                stop_reason="completed",
+            )
             await self._announce_result(task_id, label, task, final_result, origin, "ok")
 
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
+            self._tracer.finish(
+                final_response=error_msg,
+                stop_reason="error",
+                error=str(e),
+            )
             await self._announce_result(task_id, label, task, error_msg, origin, "error")
 
     async def _announce_result(

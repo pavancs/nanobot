@@ -59,6 +59,7 @@ class Trace:
     final_response: str = ""
     stop_reason: str = ""
     error: str | None = None
+    routing: dict[str, Any] = field(default_factory=dict)
     _start_time: float = field(default=0.0, repr=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -77,6 +78,7 @@ class Trace:
                 "total_input_messages": self.total_input_messages,
             },
             "model": self.model,
+            "routing": self.routing,
             "llm_calls": [
                 {
                     "iteration": c.iteration,
@@ -147,6 +149,11 @@ class Tracer:
         self._active.history_messages = history_messages
         self._active.history_tokens = history_tokens
         self._active.total_input_messages = total_messages
+
+    def log_routing(self, decision) -> None:
+        if not self._active:
+            return
+        self._active.routing = decision.to_dict() if hasattr(decision, "to_dict") else {}
 
     def log_llm_call(self, iteration: int, model: str, usage: dict[str, int], duration_ms: int, response_type: str, content_preview: str = "", tool_calls: list[dict[str, Any]] | None = None) -> None:
         if not self._active:
