@@ -77,7 +77,12 @@ class OpenAICodexProvider(LLMProvider):
                     DEFAULT_CODEX_URL, headers, body, verify=False,
                     on_content_delta=on_content_delta,
                 )
-            return LLMResponse(content=content, tool_calls=tool_calls, finish_reason=finish_reason)
+            # Estimate token usage since Codex SSE does not return usage
+            input_text = " ".join(str(m.get("content", "")) for m in messages)
+            est_input = len(input_text) // 4
+            est_output = len(content or "") // 4
+            usage = {"prompt_tokens": est_input, "completion_tokens": est_output, "total_tokens": est_input + est_output}
+            return LLMResponse(content=content, tool_calls=tool_calls, finish_reason=finish_reason, usage=usage)
         except Exception as e:
             msg = f"Error calling Codex: {e}"
             retry_after = getattr(e, "retry_after", None) or self._extract_retry_after(msg)

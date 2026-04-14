@@ -285,19 +285,42 @@ class SubagentManager:
             lines.append(f"- {result.error}")
         return "\n".join(lines) or (result.error or "Error: subagent execution failed.")
 
-    def _build_subagent_prompt(self) -> str:
+    def _build_subagent_prompt(self, subagent_name: str | None = None) -> str:
         """Build a focused system prompt for the subagent."""
         from nanobot.agent.context import ContextBuilder
         from nanobot.agent.skills import SkillsLoader
 
         time_ctx = ContextBuilder._build_runtime_context(None, None)
         skills_summary = SkillsLoader(self.workspace).build_skills_summary()
-        return render_template(
+        base_prompt = render_template(
             "agent/subagent_system.md",
             time_ctx=time_ctx,
             workspace=str(self.workspace),
             skills_summary=skills_summary or "",
         )
+
+        extra = ""
+        if subagent_name:
+            sa_dir = self.workspace / "subagents" / subagent_name
+            soul_file = sa_dir / "SOUL.md"
+            agents_file = sa_dir / "AGENTS.md"
+            if soul_file.exists():
+                extra += "\n\n## Subagent Identity\n" + soul_file.read_text(encoding="utf-8").strip()
+            if agents_file.exists():
+                extra += "\n\n## Subagent Rules\n" + agents_file.read_text(encoding="utf-8").strip()
+
+        user_file = self.workspace / "USER.md"
+        memory_file = self.workspace / "memory" / "MEMORY.md"
+        if user_file.exists():
+            uc = user_file.read_text(encoding="utf-8").strip()
+            if uc:
+                extra += "\n\n## User Profile\n" + uc
+        if memory_file.exists():
+            mc = memory_file.read_text(encoding="utf-8").strip()
+            if mc:
+                extra += "\n\n## Memory\n" + mc
+
+        return base_prompt + extra
 
     async def cancel_by_session(self, session_key: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
