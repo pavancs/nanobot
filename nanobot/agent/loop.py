@@ -605,6 +605,20 @@ class AgentLoop:
         key = session_key or msg.session_key
         self.tracer.start(channel=msg.channel, sender_id=msg.sender_id, session_key=key, input_message=msg.content, model=self.model)
         session = self.sessions.get_or_create(key)
+
+        # Auto-clear session after 15 minutes of inactivity
+        if session.messages:
+            last_ts = session.messages[-1].get("timestamp")
+            if last_ts:
+                from datetime import datetime
+                try:
+                    last_time = datetime.fromisoformat(last_ts)
+                    idle_seconds = (datetime.now() - last_time).total_seconds()
+                    if idle_seconds > 900:  # 15 minutes
+                        logger.info("Session {} idle for {:.0f}s, auto-clearing", key, idle_seconds)
+                        session.clear()
+                except (ValueError, TypeError):
+                    pass
         if self._restore_runtime_checkpoint(session):
             self.sessions.save(session)
 
