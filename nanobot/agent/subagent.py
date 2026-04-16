@@ -65,6 +65,7 @@ class SubagentManager:
         self.restrict_to_workspace = restrict_to_workspace
         self.runner = AgentRunner(provider)
         self._tracer = Tracer(workspace)
+        self._mcp_tools: list = []  # MCP tools passed from main agent
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
         self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
 
@@ -155,6 +156,9 @@ class SubagentManager:
             if self.web_config.enable:
                 tools.register(WebSearchTool(config=self.web_config.search, proxy=self.web_config.proxy))
                 tools.register(WebFetchTool(proxy=self.web_config.proxy))
+            # Register MCP tools from main agent
+            for mcp_tool in self._mcp_tools:
+                tools.register(mcp_tool)
             system_prompt = self._build_subagent_prompt(subagent_name)
             messages: list[dict[str, Any]] = [
                 {"role": "system", "content": system_prompt},
@@ -165,6 +169,7 @@ class SubagentManager:
                 initial_messages=messages,
                 tools=tools,
                 model=model or self.model,
+                max_tokens=16384,
                 max_iterations=15,
                 max_tool_result_chars=self.max_tool_result_chars,
                 hook=_SubagentHook(task_id),
@@ -331,6 +336,13 @@ class SubagentManager:
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         return len(tasks)
+
+    def set_mcp_tools(self, main_tools) -> None:
+        """Copy MCP tools from main agent registry for subagent use."""
+        self._mcp_tools = [
+            t for name, t in main_tools._tools.items()
+            if name.startswith("mcp_")
+        ] if hasattr(main_tools, "_tools") else []
 
     def get_running_count(self) -> int:
         """Return the number of currently running subagents."""

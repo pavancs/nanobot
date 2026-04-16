@@ -5,4 +5,4 @@ Task: {{ task }}
 Result:
 {{ result }}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs.
+Forward this result to the user AS-IS. Do NOT summarize, shorten, or modify the content. Send the full result exactly as written above. Do not mention subagent or task IDs.
